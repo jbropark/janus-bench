@@ -54,7 +54,7 @@ func watchHandle(handle *janus.Handle) {
 	}
 }
 
-func checkStats(statsGetter *stats.Getter, track *webrtc.TrackRemote) {
+func checkStats(statsGetter stats.Getter, track *webrtc.TrackRemote) {
 	for {
 		stats := statsGetter.Get(uint32(track.SSRC()))
 
