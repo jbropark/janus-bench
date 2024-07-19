@@ -16,9 +16,9 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media/oggwriter"
 )
 
-func saveToDisk(i media.Writer, track *webrtc.TrackRemote) {
+func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 	defer func() {
-		if err := i.Close(); err != nil {
+		if err := writer.Close(); err != nil {
 			panic(err)
 		}
 	}()
@@ -29,7 +29,7 @@ func saveToDisk(i media.Writer, track *webrtc.TrackRemote) {
 			panic(err)
 		}
 
-		if err := i.WriteRTP(packet); err != nil {
+		if err := writer.WriteRTP(packet); err != nil {
 			panic(err)
 		}
 	}
@@ -41,24 +41,34 @@ func watchHandle(handle *janus.Handle) {
 		msg := <-handle.Events
 		switch msg := msg.(type) {
 		case *janus.SlowLinkMsg:
-			fmt.Print("SlowLinkMsg type ", handle.ID)
+			fmt.Printf("[%d] Got SlowLinkMsg\n", handle.ID)
 		case *janus.MediaMsg:
-			fmt.Print("MediaEvent type", msg.Type, " receiving ", msg.Receiving)
+			fmt.Printf("[%d] Got MediaMsg\n", handle.ID)
 		case *janus.WebRTCUpMsg:
-			fmt.Print("WebRTCUp type ", handle.ID)
+			fmt.Printf("[%d] Got WebRTCUpMsg\n", handle.ID)
 		case *janus.HangupMsg:
-			fmt.Print("HangupEvent type ", handle.ID)
+			fmt.Printf("[%d] Got HangupMsg\n", handle.ID)
 		case *janus.EventMsg:
-			fmt.Printf("EventMsg %+v", msg.Plugindata.Data)
+			fmt.Printf("[%d] Got EventMsg %+v\n", handle.ID, msg.Plugindata.Data)
 		}
 	}
 }
 
-func main() {
-	// Everything below is the Pion WebRTC API! Thanks for using it ❤️.
-	m := &webrtc.MediaEngine{}
+func checkStats(statsGetter *stats.Getter, track *webrtc.TrackRemote) {
+	for {
+		stats := statsGetter.Get(uint32(track.SSRC()))
 
-	if err := m.RegisterDefaultCodecs(); err != nil {
+		fmt.Printf("Stats for: %s\n", track.Codec().MimeType)
+		fmt.Println(stats.InboundRTPStreamStats)
+
+		time.Sleep(time.Second * 5)
+	}
+}
+
+func main() {
+	engine := &webrtc.MediaEngine{}
+
+	if err := engine.RegisterDefaultCodecs(); err != nil {
 		panic(err)
 	}
 
@@ -70,16 +80,16 @@ func main() {
 	}
 
 	var statsGetter stats.Getter
-	statsInterceptorFactory.OnNewPeerConnection(func(_ string, g stats.Getter) {
-		statsGetter = g
+	statsInterceptorFactory.OnNewPeerConnection(func(_ string, getter stats.Getter) {
+		statsGetter = getter
 	})
 	registry.Add(statsInterceptorFactory)
 
-	if err = webrtc.RegisterDefaultInterceptors(m, registry); err != nil {
+	if err = webrtc.RegisterDefaultInterceptors(engine, registry); err != nil {
 		panic(err)
 	}
 
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry))
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
 
 	// Janus
 	gateway, err := janus.Connect("ws://172.20.0.2:8188/")
@@ -155,37 +165,33 @@ func main() {
 		}
 
 		peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-			fmt.Printf("Connection State has changed %s \n", connectionState.String())
+			fmt.Printf("[%d] Connection State has changed to %s \n", handle.ID, connectionState.String())
 		})
 
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			go func() {
-				for {
-					stats := statsGetter.Get(uint32(track.SSRC()))
+			go checkStats(statsGetter, track)
 
-					fmt.Printf("Stats for: %s\n", track.Codec().MimeType)
-					fmt.Println(stats.InboundRTPStreamStats)
-
-					time.Sleep(time.Second * 5)
-				}
-			}()
 			codec := track.Codec()
 			if codec.MimeType == "audio/opus" {
 				fmt.Println("Got Opus track, saving to disk as output.ogg")
-				i, oggNewErr := oggwriter.New("output.ogg", codec.ClockRate, codec.Channels)
+				writer, oggNewErr := oggwriter.New("output.ogg", codec.ClockRate, codec.Channels)
 				if oggNewErr != nil {
 					panic(oggNewErr)
 				}
-				saveToDisk(i, track)
+				saveToDisk(writer, track)
 			} else if codec.MimeType == "video/VP8" {
 				fmt.Println("Got VP8 track, saving to disk as output.ivf")
-				i, ivfNewErr := ivfwriter.New("output.ivf")
+				writer, ivfNewErr := ivfwriter.New("output.ivf")
 				if ivfNewErr != nil {
 					panic(ivfNewErr)
 				}
-				saveToDisk(i, track)
+				saveToDisk(writer, track)
+			} else {
+				fmt.Println("Got track with unknown codec " + codec.MimeType)
 			}
-			fmt.Printf("RTX: %t \n", track.HasRTX())
+			fmt.Printf("[%d] ID : %s \n", handle.ID, track.ID())
+			fmt.Printf("[%d] RTX: %t \n", handle.ID, track.HasRTX())
+			fmt.Printf("[%d] RID: %s \n", handle.ID, track.RID())
 		})
 
 		if err = peerConnection.SetRemoteDescription(offer); err != nil {
@@ -221,6 +227,8 @@ func main() {
 			panic(err)
 		}
 	}
+
+	// health check
 	for {
 		if _, err = session.KeepAlive(); err != nil {
 			panic(err)
