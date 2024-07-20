@@ -241,7 +241,7 @@ func main() {
 	}
 
 	// Create session
-	_, handle = createNewStreamingHandle(gateway)
+	_, handle := createNewStreamingHandle(gateway)
 
 	// init bench csv
 	benchFile, err := os.Create(*argBenchPath)
