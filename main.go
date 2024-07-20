@@ -13,6 +13,7 @@ import (
 	"sync"
 	"os/signal"
 	"syscall"
+	"strconv"
 
 	janus "github.com/notedit/janus-go"
 	"github.com/pion/interceptor"
@@ -41,7 +42,7 @@ func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRem
 	defer wg.Done()
 
 	defer func() {
-		fmt.Printf("Try to close disk\n")
+		fmt.Printf("[%s] try to close disk\n", track.ID())
 		if err := writer.Close(); err != nil {
 			panic(err)
 		}
@@ -50,7 +51,7 @@ func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRem
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Stop save to disk")
+			fmt.Printf("[%s] stop saving to disk\n", track.ID())
 			return
 		default:
 			packet, _, err := track.ReadRTP()
@@ -69,12 +70,12 @@ func saveOpusToDisk(ctx context.Context, track *webrtc.TrackRemote, path string)
 	codec := track.Codec()
 	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Printf("knwon codec %s: do not save (path not given)\n", mime)
+		fmt.Printf("[%s] knwon codec %s: do not save (path not given)\n", track.ID(), mime)
 		readToDiscard(track)
 		return
 	}
 
-	fmt.Printf("known codec %s: save to '%s'\n", mime, path)
+	fmt.Printf("[%s] known codec %s: save to '%s'\n", track.ID(), mime, path)
 	writer, err := oggwriter.New(path, codec.ClockRate, codec.Channels)
 	if err != nil {
 		panic(err)
@@ -86,12 +87,12 @@ func saveVP8ToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) 
 	codec := track.Codec()
 	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Printf("known codec %s: do not save (path not given)\n", mime)
+		fmt.Printf("[%s] known codec %s: do not save (path not given)\n", track.ID(), mime)
 		readToDiscard(track)
 		return
 	}
 
-	fmt.Printf("known codec $s: save to '%s'\n", mime, path)
+	fmt.Printf("[%s] known codec $s: save to '%s'\n", track.ID(), mime, path)
 	writer, err := ivfwriter.New(path)
 	if err != nil {
 		panic(err)
@@ -120,7 +121,7 @@ func watchHandle(handle *janus.Handle) {
 
 var statsGetter stats.Getter
 
-var BENCH_COLUMN_NAMES = []string{"asdf", "asdf"}
+var BENCH_COLUMN_NAMES = []string{"track", "last_received_dt", "packet_received", "packet_lost", "jitter", "nack_count"}
 
 func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
 	wg.Add(1)
@@ -129,16 +130,29 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
+	count := 0
 	trackID := track.ID()
 	ssrc := uint32(track.SSRC())
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("stop save bench")
+			fmt.Printf("[%s] stop saving bench\n", trackID)
 			return
 		case <-ticker.C:
 			stats := statsGetter.Get(ssrc)
 			inbound := stats.InboundRTPStreamStats
+			values := []string{
+				trackID,
+				inbound.LastPacketReceivedTimestamp.Format("2006-01-02T15:04:05.000000"),
+				strconv.FormatUint(inbound.PacketsReceived, 10),
+				strconv.FormatInt(inbound.PacketsLost, 10),
+				strconv.FormatFloat(inbound.Jitter, 'f', -1, 64),
+				strconv.FormatUint(uint64(inbound.NACKCount), 10),
+			}
+			writer.Write(values)
+
+			count += 1
+			fmt.Printf("[%s] (%d / -) %v\n", trackID, count, inbound)
 
 			/*
 			inbound.PacketsReceived
@@ -149,13 +163,6 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 			inbound.BytesReceived
 			inbound.NACKCount
 			*/
-
-			// fmt.Println(inbound)
-			//fmt.Println(trackID, inbound)
-			_ = inbound
-			_ = trackID
-
-
 		}
 	}
 }
@@ -222,7 +229,7 @@ func main() {
 	flag.Parse()
 
 	url := fmt.Sprintf("ws://%s:%d/", *argHost, *argPort)
-	fmt.Printf("URL: %s\n", url)
+	fmt.Printf("Janus Websocket API URL: %s\n", url)
 
 	// graceful stop setup
 	cancelChan := make(chan os.Signal)
@@ -314,7 +321,7 @@ func main() {
 			} else if codec.MimeType == "video/VP8" {
 				saveVP8ToDisk(ctx, track, *argVideoPath)
 			} else {
-				fmt.Printf("Unknown codec: %s\n", codec.MimeType)
+				fmt.Printf("[%s] Unknown codec: %s\n", track.ID(), codec.MimeType)
 			}
 		})
 
@@ -354,7 +361,7 @@ func main() {
 
 	// wait signal
 	sig := <-cancelChan
-	fmt.Printf("Got %v: clean up...\n", sig)
+	fmt.Printf("Got Signal %v: clean up...\n", sig)
 	cancel()
 	wg.Wait()
 	fmt.Printf("Done!\n")
