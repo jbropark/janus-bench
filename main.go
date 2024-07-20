@@ -4,65 +4,96 @@
 package main
 
 import (
+	"os"
 	"fmt"
 	"time"
 	"flag"
+	"encoding/csv"
+	"context"
+	"sync"
+	"os/signal"
+	"syscall"
 
 	janus "github.com/notedit/janus-go"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/stats"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/ivfwriter"
-	"github.com/pion/webrtc/v4/pkg/media/oggwriter"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/webrtc/v3/pkg/media/ivfwriter"
+	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
 )
 
-func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
+func readToDiscard(track *webrtc.TrackRemote) {
+	for {
+		_, _, err := track.ReadRTP()
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+var wg sync.WaitGroup
+
+func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRemote) {
+	wg.Add(1)
+	defer wg.Done()
+
 	defer func() {
+		fmt.Printf("Try to close disk\n")
 		if err := writer.Close(); err != nil {
 			panic(err)
 		}
 	}()
 
 	for {
-		packet, _, err := track.ReadRTP()
-		if err != nil {
-			panic(err)
-		}
+		select {
+		case <-ctx.Done():
+			fmt.Println("Stop save to disk")
+			return
+		default:
+			packet, _, err := track.ReadRTP()
+			if err != nil {
+				panic(err)
+			}
 
-		if err := writer.WriteRTP(packet); err != nil {
-			panic(err)
+			if err := writer.WriteRTP(packet); err != nil {
+				panic(err)
+			}
 		}
 	}
 }
 
-func saveOpusToDisk(track *webrtc.TrackRemote, path string) {
+func saveOpusToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) {
+	codec := track.Codec()
+	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Println("do not save (path not given)")
+		fmt.Printf("knwon codec %s: do not save (path not given)\n", mime)
+		readToDiscard(track)
 		return
 	}
 
-	codec := track.Codec()
-	fmt.Printf("save to '%s'\n", path)
+	fmt.Printf("known codec %s: save to '%s'\n", mime, path)
 	writer, err := oggwriter.New(path, codec.ClockRate, codec.Channels)
 	if err != nil {
 		panic(err)
 	}
-	saveToDisk(writer, track)
+	saveToDisk(ctx, writer, track)
 }
 
-func saveVP8ToDisk(track *webrtc.TrackRemote, path string) {
+func saveVP8ToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) {
+	codec := track.Codec()
+	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Println("do not save (path not given)")
+		fmt.Printf("known codec %s: do not save (path not given)\n", mime)
+		readToDiscard(track)
 		return
 	}
-
-	fmt.Printf("save to '%s'\n", path)
+	fmt.Printf("known codec $s: save to '%s'\n", mime, path)
 	writer, err := ivfwriter.New(path)
 	if err != nil {
 		panic(err)
 	}
-	saveToDisk(writer, track)
+	saveToDisk(ctx, writer, track)
 }
 
 func watchHandle(handle *janus.Handle) {
@@ -84,14 +115,62 @@ func watchHandle(handle *janus.Handle) {
 	}
 }
 
-func saveBench(statsGetter stats.Getter, track *webrtc.TrackRemote, path string, interval int) {
+
+var BENCH_COLUMN_NAMES = []string{"asdf", "asdf"}
+
+func saveBench(ctx context.Context, statsGetter stats.Getter, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
+	wg.Add(1)
+	defer wg.Done()
+
+	trackID := track.ID()
+	ssrc := uint32(track.SSRC())
 	for {
-		stats := statsGetter.Get(uint32(track.SSRC()))
+		select {
+		case <-ctx.Done():
+			fmt.Println("stop save bench")
+			return
+		default:
+			stats := statsGetter.Get(ssrc)
+			inbound := stats.InboundRTPStreamStats
 
-		fmt.Printf("Stats for: %s\n", track.Codec().MimeType)
-		fmt.Println(stats.InboundRTPStreamStats)
+			/*
+			inbound.PacketsReceived
+			inbound.PacketsLost
+			inbound.Jitter
+			inbound.LastPacketReceivedTimestamp
+			inbound.HeaderBytesReceived
+			inbound.BytesReceived
+			inbound.NACKCount
+			*/
 
-		time.Sleep(time.Second * time.Duration(interval))
+			// fmt.Println(inbound)
+			//fmt.Println(trackID, inbound)
+			_ = inbound
+			_ = trackID
+
+
+			time.Sleep(time.Second * time.Duration(interval))
+		}
+	}
+}
+
+func keepAlive(ctx context.Context, session *janus.Session) {
+	wg.Add(1)
+	defer wg.Done()
+
+	// health check
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("Stop keepalive goroutine")
+			return
+		default:
+			fmt.Println("Send keepalive")
+			if _, err := session.KeepAlive(); err != nil {
+				panic(err)
+			}
+			time.Sleep(5 * time.Second)
+		}
 	}
 }
 
@@ -107,9 +186,20 @@ func main() {
 	flag.Parse()
 
 	url := fmt.Sprintf("ws://%s:%d/", *argHost, *argPort)
+	benchPath := os.DevNull
+	if len(*argBenchPath) > 0 {
+		benchPath = *argBenchPath
+	}
 
 	fmt.Printf("URL: %s\n", url)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// graceful stop setup
+	cancelChan := make(chan os.Signal)
+	signal.Notify(cancelChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// WebRTC
 	engine := &webrtc.MediaEngine{}
 
 	if err := engine.RegisterDefaultCodecs(); err != nil {
@@ -164,6 +254,23 @@ func main() {
 		panic(err)
 	}
 
+	go keepAlive(ctx, session)
+
+	fmt.Println("Start making new bench file")
+	benchFile, err := os.Create(benchPath)
+	if err != nil {
+		panic(err)
+	}
+	defer benchFile.Close()
+
+	benchWriter := csv.NewWriter(benchFile)
+	defer func() {
+		fmt.Println("Flush defer")
+		benchWriter.Flush()
+	}()
+
+	benchWriter.Write(BENCH_COLUMN_NAMES)
+
 	if msg.Jsep != nil {
 		sdpVal, ok := msg.Jsep["sdp"].(string)
 		if !ok {
@@ -205,16 +312,16 @@ func main() {
 		})
 
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			go saveBench(statsGetter, track, *argBenchPath, *argBenchInterval)
+			go saveBench(ctx, statsGetter, track, benchWriter, *argBenchInterval)
 
 			codec := track.Codec()
-			fmt.Printf("[%d] Got %s(%s, rtx=%t) track: ", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
+			fmt.Printf("[%d] Got track %s(%s, rtx=%t)\n", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
 			if codec.MimeType == "audio/opus" {
-				saveOpusToDisk(track, *argAudioPath)
+				saveOpusToDisk(ctx, track, *argAudioPath)
 			} else if codec.MimeType == "video/VP8" {
-				saveVP8ToDisk(track, *argVideoPath)
+				saveVP8ToDisk(ctx, track, *argVideoPath)
 			} else {
-				fmt.Println("unknown codec")
+				fmt.Printf("Unknown codec: %s\n", codec.MimeType)
 			}
 		})
 
@@ -252,12 +359,10 @@ func main() {
 		}
 	}
 
-	// health check
-	for {
-		if _, err = session.KeepAlive(); err != nil {
-			panic(err)
-		}
+	sig := <-cancelChan
 
-		time.Sleep(5 * time.Second)
-	}
+	fmt.Printf("Got %v: clean up...\n", sig)
+	cancel()
+	wg.Wait()
+	fmt.Printf("Done!\n")		
 }

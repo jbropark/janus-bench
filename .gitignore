@@ -24,3 +24,4 @@ go.work.sum
 # output
 *.ivf
 *.ogg
+*.csv
