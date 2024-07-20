@@ -233,7 +233,6 @@ func main() {
 
 	// graceful stop setup
 	cancelChan := make(chan os.Signal)
-	signal.Notify(cancelChan, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// WebRTC
@@ -358,6 +357,9 @@ func main() {
 			panic(err)
 		}
 	}
+
+	// start sigint notify
+	signal.Notify(cancelChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// wait signal
 	sig := <-cancelChan
