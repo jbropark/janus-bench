@@ -92,7 +92,7 @@ func saveVP8ToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) 
 		return
 	}
 
-	fmt.Printf("[%s] known codec $s: save to '%s'\n", track.ID(), mime, path)
+	fmt.Printf("[%s] known codec %s: save to '%s'\n", track.ID(), mime, path)
 	writer, err := ivfwriter.New(path)
 	if err != nil {
 		panic(err)
