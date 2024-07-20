@@ -23,6 +23,10 @@ import (
 	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
 )
 
+
+var wg sync.WaitGroup
+
+
 func readToDiscard(track *webrtc.TrackRemote) {
 	for {
 		_, _, err := track.ReadRTP()
@@ -31,8 +35,6 @@ func readToDiscard(track *webrtc.TrackRemote) {
 		}
 	}
 }
-
-var wg sync.WaitGroup
 
 func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRemote) {
 	wg.Add(1)
@@ -88,6 +90,7 @@ func saveVP8ToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) 
 		readToDiscard(track)
 		return
 	}
+
 	fmt.Printf("known codec $s: save to '%s'\n", mime, path)
 	writer, err := ivfwriter.New(path)
 	if err != nil {
@@ -115,10 +118,11 @@ func watchHandle(handle *janus.Handle) {
 	}
 }
 
+var statsGetter stats.Getter
 
 var BENCH_COLUMN_NAMES = []string{"asdf", "asdf"}
 
-func saveBench(ctx context.Context, statsGetter stats.Getter, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
+func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
 	wg.Add(1)
 	defer wg.Done()
 
@@ -174,7 +178,48 @@ func keepAlive(ctx context.Context, session *janus.Session) {
 	}
 }
 
+func createWebRTCAPI(engine *webrtc.MediaEngine, registry *interceptor.Registry) webrtc.API {
+	if err := engine.RegisterDefaultCodecs(); err != nil {
+		panic(err)
+	}
+
+
+	statsInterceptorFactory, err := stats.NewInterceptor()
+	if err != nil {
+		panic(err)
+	}
+
+	statsInterceptorFactory.OnNewPeerConnection(func(_ string, getter stats.Getter) {
+		statsGetter = getter
+	})
+	registry.Add(statsInterceptorFactory)
+
+	if err = webrtc.RegisterDefaultInterceptors(engine, registry); err != nil {
+		panic(err)
+	}
+
+	return webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
+}
+
+func createNewStreamingHandle(ctx context.Context, gateway *janus.Gateway) (*janus.Session, *janus.Handle) {
+	session, err := gateway.Create()
+	if err != nil {
+		panic(err)
+	}
+	go keepAlive(ctx, session)
+
+	// Create handle
+	handle, err := session.Attach("janus.plugin.streaming")
+	if err != nil {
+		panic(err)
+	}
+	go watchHandle(handle)
+
+	return session, handle
+}
+
 func main() {
+	// parse arguments
 	argHost := flag.String("host", "172.20.0.2", "janus ip")
 	argPort := flag.Int("port", 8188, "janus websocket port")
 	argRoomID := flag.Int("room", 1, "target room id")
@@ -186,44 +231,17 @@ func main() {
 	flag.Parse()
 
 	url := fmt.Sprintf("ws://%s:%d/", *argHost, *argPort)
-	benchPath := os.DevNull
-	if len(*argBenchPath) > 0 {
-		benchPath = *argBenchPath
-	}
-
 	fmt.Printf("URL: %s\n", url)
-
-	ctx, cancel := context.WithCancel(context.Background())
 
 	// graceful stop setup
 	cancelChan := make(chan os.Signal)
 	signal.Notify(cancelChan, syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// WebRTC
-	engine := &webrtc.MediaEngine{}
-
-	if err := engine.RegisterDefaultCodecs(); err != nil {
-		panic(err)
-	}
-
-	registry := &interceptor.Registry{}
-
-	statsInterceptorFactory, err := stats.NewInterceptor()
-	if err != nil {
-		panic(err)
-	}
-
-	var statsGetter stats.Getter
-	statsInterceptorFactory.OnNewPeerConnection(func(_ string, getter stats.Getter) {
-		statsGetter = getter
-	})
-	registry.Add(statsInterceptorFactory)
-
-	if err = webrtc.RegisterDefaultInterceptors(engine, registry); err != nil {
-		panic(err)
-	}
-
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
+	var engine webrtc.MediaEngine
+	var registry interceptor.Registry
+	api := createWebRTCAPI(engine, registry)
 
 	// Janus
 	gateway, err := janus.Connect(url)
@@ -232,18 +250,19 @@ func main() {
 	}
 
 	// Create session
-	session, err := gateway.Create()
+	session, handle = createNewStreamingHandle(ctx, gateway)
+
+	// init bench csv
+	benchFile, err := os.Create(*argBenchPath)
 	if err != nil {
 		panic(err)
 	}
+	defer benchFile.Close()
 
-	// Create handle
-	handle, err := session.Attach("janus.plugin.streaming")
-	if err != nil {
-		panic(err)
-	}
+	benchWriter := csv.NewWriter(benchFile)
+	defer benchWriter.Flush()
 
-	go watchHandle(handle)
+	benchWriter.Write(BENCH_COLUMN_NAMES)
 
 	// Watch the second stream
 	msg, err := handle.Message(map[string]interface{}{
@@ -253,23 +272,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	go keepAlive(ctx, session)
-
-	fmt.Println("Start making new bench file")
-	benchFile, err := os.Create(benchPath)
-	if err != nil {
-		panic(err)
-	}
-	defer benchFile.Close()
-
-	benchWriter := csv.NewWriter(benchFile)
-	defer func() {
-		fmt.Println("Flush defer")
-		benchWriter.Flush()
-	}()
-
-	benchWriter.Write(BENCH_COLUMN_NAMES)
 
 	if msg.Jsep != nil {
 		sdpVal, ok := msg.Jsep["sdp"].(string)
@@ -312,7 +314,7 @@ func main() {
 		})
 
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			go saveBench(ctx, statsGetter, track, benchWriter, *argBenchInterval)
+			go saveBench(ctx, track, benchWriter, *argBenchInterval)
 
 			codec := track.Codec()
 			fmt.Printf("[%d] Got track %s(%s, rtx=%t)\n", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
@@ -359,10 +361,10 @@ func main() {
 		}
 	}
 
+	// wait signal
 	sig := <-cancelChan
-
 	fmt.Printf("Got %v: clean up...\n", sig)
 	cancel()
 	wg.Wait()
-	fmt.Printf("Done!\n")		
+	fmt.Printf("Done!\n")
 }
