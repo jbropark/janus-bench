@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"time"
+	"flag"
 
 	janus "github.com/notedit/janus-go"
 	"github.com/pion/interceptor"
@@ -35,6 +36,35 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 	}
 }
 
+func saveOpusToDisk(track *webrtc.TrackRemote, path string) {
+	if len(path) == 0 {
+		fmt.Println("do not save (path not given)")
+		return
+	}
+
+	codec := track.Codec()
+	fmt.Printf("save to '%s'\n", path)
+	writer, err := oggwriter.New(path, codec.ClockRate, codec.Channels)
+	if err != nil {
+		panic(err)
+	}
+	saveToDisk(writer, track)
+}
+
+func saveVP8ToDisk(track *webrtc.TrackRemote, path string) {
+	if len(path) == 0 {
+		fmt.Println("do not save (path not given)")
+		return
+	}
+
+	fmt.Printf("save to '%s'\n", path)
+	writer, err := ivfwriter.New(path)
+	if err != nil {
+		panic(err)
+	}
+	saveToDisk(writer, track)
+}
+
 func watchHandle(handle *janus.Handle) {
 	// wait for event
 	for {
@@ -54,18 +84,32 @@ func watchHandle(handle *janus.Handle) {
 	}
 }
 
-func checkStats(statsGetter stats.Getter, track *webrtc.TrackRemote) {
+func saveBench(statsGetter stats.Getter, track *webrtc.TrackRemote, path string, interval int) {
 	for {
 		stats := statsGetter.Get(uint32(track.SSRC()))
 
 		fmt.Printf("Stats for: %s\n", track.Codec().MimeType)
 		fmt.Println(stats.InboundRTPStreamStats)
 
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * time.Duration(interval))
 	}
 }
 
 func main() {
+	argHost := flag.String("host", "172.20.0.2", "janus ip")
+	argPort := flag.Int("port", 8188, "janus websocket port")
+	argRoomID := flag.Int("room", 1, "target room id")
+	argVideoPath := flag.String("video", "", "output video path")
+	argAudioPath := flag.String("audio", "", "output audio path")
+	argBenchPath := flag.String("o", "bench.csv", "output bench path")
+	argBenchInterval := flag.Int("interval", 5, "bench sample interval")
+
+	flag.Parse()
+
+	url := fmt.Sprintf("ws://%s:%d/", *argHost, *argPort)
+
+	fmt.Printf("URL: %s\n", url)
+
 	engine := &webrtc.MediaEngine{}
 
 	if err := engine.RegisterDefaultCodecs(); err != nil {
@@ -92,7 +136,7 @@ func main() {
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
 
 	// Janus
-	gateway, err := janus.Connect("ws://172.20.0.2:8188/")
+	gateway, err := janus.Connect(url)
 	if err != nil {
 		panic(err)
 	}
@@ -111,18 +155,10 @@ func main() {
 
 	go watchHandle(handle)
 
-	// Get streaming list
-	_, err = handle.Request(map[string]interface{}{
-		"request": "list",
-	})
-	if err != nil {
-		panic(err)
-	}
-
 	// Watch the second stream
 	msg, err := handle.Message(map[string]interface{}{
 		"request": "watch",
-		"id":      1,
+		"id":      *argRoomID,
 	}, nil)
 	if err != nil {
 		panic(err)
@@ -169,29 +205,17 @@ func main() {
 		})
 
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			go checkStats(statsGetter, track)
+			go saveBench(statsGetter, track, *argBenchPath, *argBenchInterval)
 
 			codec := track.Codec()
+			fmt.Printf("[%d] Got %s(%s, rtx=%t) track: ", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
 			if codec.MimeType == "audio/opus" {
-				fmt.Println("Got Opus track, saving to disk as output.ogg")
-				writer, oggNewErr := oggwriter.New("output.ogg", codec.ClockRate, codec.Channels)
-				if oggNewErr != nil {
-					panic(oggNewErr)
-				}
-				saveToDisk(writer, track)
+				saveOpusToDisk(track, *argAudioPath)
 			} else if codec.MimeType == "video/VP8" {
-				fmt.Println("Got VP8 track, saving to disk as output.ivf")
-				writer, ivfNewErr := ivfwriter.New("output.ivf")
-				if ivfNewErr != nil {
-					panic(ivfNewErr)
-				}
-				saveToDisk(writer, track)
+				saveVP8ToDisk(track, *argVideoPath)
 			} else {
-				fmt.Println("Got track with unknown codec " + codec.MimeType)
+				fmt.Println("unknown codec")
 			}
-			fmt.Printf("[%d] ID : %s \n", handle.ID, track.ID())
-			fmt.Printf("[%d] RTX: %t \n", handle.ID, track.HasRTX())
-			fmt.Printf("[%d] RID: %s \n", handle.ID, track.RID())
 		})
 
 		if err = peerConnection.SetRemoteDescription(offer); err != nil {
