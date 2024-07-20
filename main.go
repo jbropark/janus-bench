@@ -38,8 +38,8 @@ func readToDiscard(track *webrtc.TrackRemote) {
 }
 
 func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRemote) {
-	wg.Add(1)
 	defer wg.Done()
+	wg.Add(1)
 
 	defer func() {
 		fmt.Printf("[%s] try to close disk\n", track.ID())
@@ -124,8 +124,8 @@ var statsGetter stats.Getter
 var BENCH_COLUMN_NAMES = []string{"track", "last_received_dt", "packet_received", "packet_lost", "jitter", "nack_count"}
 
 func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
-	wg.Add(1)
 	defer wg.Done()
+	wg.Add(1)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
