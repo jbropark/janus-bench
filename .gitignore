@@ -25,3 +25,6 @@ go.work.sum
 *.ivf
 *.ogg
 *.csv
+
+# program
+janus-bench

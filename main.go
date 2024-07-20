@@ -126,6 +126,9 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 	wg.Add(1)
 	defer wg.Done()
 
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
 	trackID := track.ID()
 	ssrc := uint32(track.SSRC())
 	for {
@@ -133,7 +136,7 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 		case <-ctx.Done():
 			fmt.Println("stop save bench")
 			return
-		default:
+		case <-ticker.C:
 			stats := statsGetter.Get(ssrc)
 			inbound := stats.InboundRTPStreamStats
 
@@ -153,7 +156,6 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 			_ = trackID
 
 
-			time.Sleep(time.Second * time.Duration(interval))
 		}
 	}
 }
@@ -161,7 +163,6 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 func keepAlive(session *janus.Session) {
 	// health check
 	for {
-		fmt.Println("Send keepalive")
 		if _, err := session.KeepAlive(); err != nil {
 			panic(err)
 		}
@@ -173,7 +174,6 @@ func createWebRTCAPI(engine *webrtc.MediaEngine, registry *interceptor.Registry)
 	if err := engine.RegisterDefaultCodecs(); err != nil {
 		panic(err)
 	}
-
 
 	statsInterceptorFactory, err := stats.NewInterceptor()
 	if err != nil {
@@ -308,7 +308,7 @@ func main() {
 			go saveBench(ctx, track, benchWriter, *argBenchInterval)
 
 			codec := track.Codec()
-			fmt.Printf("[%d] Got track %s(%s, rtx=%t)\n", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
+			fmt.Printf("[%d] Got TrackRemote %s(%s, rtx=%t)\n", handle.ID, track.ID(), codec.MimeType, track.HasRTX())
 			if codec.MimeType == "audio/opus" {
 				saveOpusToDisk(ctx, track, *argAudioPath)
 			} else if codec.MimeType == "video/VP8" {
