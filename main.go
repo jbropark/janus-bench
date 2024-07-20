@@ -158,27 +158,18 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 	}
 }
 
-func keepAlive(ctx context.Context, session *janus.Session) {
-	wg.Add(1)
-	defer wg.Done()
-
+func keepAlive(session *janus.Session) {
 	// health check
 	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("Stop keepalive goroutine")
-			return
-		default:
-			fmt.Println("Send keepalive")
-			if _, err := session.KeepAlive(); err != nil {
-				panic(err)
-			}
-			time.Sleep(5 * time.Second)
+		fmt.Println("Send keepalive")
+		if _, err := session.KeepAlive(); err != nil {
+			panic(err)
 		}
+		time.Sleep(5 * time.Second)
 	}
 }
 
-func createWebRTCAPI(engine *webrtc.MediaEngine, registry *interceptor.Registry) webrtc.API {
+func createWebRTCAPI(engine *webrtc.MediaEngine, registry *interceptor.Registry) *webrtc.API {
 	if err := engine.RegisterDefaultCodecs(); err != nil {
 		panic(err)
 	}
@@ -201,12 +192,12 @@ func createWebRTCAPI(engine *webrtc.MediaEngine, registry *interceptor.Registry)
 	return webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(registry))
 }
 
-func createNewStreamingHandle(ctx context.Context, gateway *janus.Gateway) (*janus.Session, *janus.Handle) {
+func createNewStreamingHandle(gateway *janus.Gateway) (*janus.Session, *janus.Handle) {
 	session, err := gateway.Create()
 	if err != nil {
 		panic(err)
 	}
-	go keepAlive(ctx, session)
+	go keepAlive(session)
 
 	// Create handle
 	handle, err := session.Attach("janus.plugin.streaming")
@@ -241,7 +232,7 @@ func main() {
 	// WebRTC
 	var engine webrtc.MediaEngine
 	var registry interceptor.Registry
-	api := createWebRTCAPI(engine, registry)
+	api := createWebRTCAPI(&engine, &registry)
 
 	// Janus
 	gateway, err := janus.Connect(url)
@@ -250,7 +241,7 @@ func main() {
 	}
 
 	// Create session
-	session, handle = createNewStreamingHandle(ctx, gateway)
+	_, handle = createNewStreamingHandle(gateway)
 
 	// init bench csv
 	benchFile, err := os.Create(*argBenchPath)
