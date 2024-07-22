@@ -18,6 +18,7 @@ import (
 	janus "github.com/notedit/janus-go"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/stats"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"github.com/pion/webrtc/v3/pkg/media/ivfwriter"
@@ -38,28 +39,35 @@ func readToDiscard(track *webrtc.TrackRemote) {
 }
 
 func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRemote) {
-	defer wg.Done()
-	wg.Add(1)
-
+	channel := make(chan struct {*rtp.Packet; error})
+	go func() {
+		for {
+			packet, _, err := track.ReadRTP()
+			channel <-struct {*rtp.Packet; error}{packet, err}
+		}
+	}()
 	defer func() {
 		fmt.Printf("[%s] try to close disk\n", track.ID())
 		if err := writer.Close(); err != nil {
 			panic(err)
 		}
+		fmt.Printf("[%s] Start Done\n", track.ID())
+		wg.Done()
+		fmt.Printf("[%s] Done\n", track.ID())
 	}()
+	wg.Add(1)
 
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Printf("[%s] stop saving to disk\n", track.ID())
 			return
-		default:
-			packet, _, err := track.ReadRTP()
-			if err != nil {
-				panic(err)
+		case r := <-channel:
+			if r.error != nil {
+				panic(r.error)
 			}
 
-			if err := writer.WriteRTP(packet); err != nil {
+			if err := writer.WriteRTP(r.Packet); err != nil {
 				panic(err)
 			}
 		}
@@ -124,7 +132,10 @@ var statsGetter stats.Getter
 var BENCH_COLUMN_NAMES = []string{"track", "last_received_dt", "packet_received", "packet_lost", "jitter", "nack_count"}
 
 func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
-	defer wg.Done()
+	defer func() {
+		wg.Done()
+		fmt.Printf("Bench Done\n");
+	}()
 	wg.Add(1)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
@@ -218,7 +229,7 @@ func createNewStreamingHandle(gateway *janus.Gateway) (*janus.Session, *janus.Ha
 
 func main() {
 	// parse arguments
-	argHost := flag.String("host", "172.20.0.2", "janus ip")
+	argHost := flag.String("host", "192.168.125.2", "janus ip")
 	argPort := flag.Int("port", 8188, "janus websocket port")
 	argRoomID := flag.Int("room", 1, "target room id")
 	argVideoPath := flag.String("video", "", "output video path")
@@ -230,6 +241,16 @@ func main() {
 
 	url := fmt.Sprintf("ws://%s:%d/", *argHost, *argPort)
 	fmt.Printf("Janus Websocket API URL: %s\n", url)
+	if len(*argVideoPath) > 0 {
+		fmt.Printf("Save video to '%s'\n", *argVideoPath)
+	} else {
+		fmt.Println("Do not save video")
+	}
+	if len(*argAudioPath) > 0 {
+		fmt.Printf("Save audio to '%s'\n", *argAudioPath)
+	} else {
+		fmt.Println("Do not save audio")
+	}
 
 	// graceful stop setup
 	cancelChan := make(chan os.Signal)
@@ -364,6 +385,7 @@ func main() {
 	// wait signal
 	sig := <-cancelChan
 	fmt.Printf("Got Signal %v: clean up...\n", sig)
+	gateway.Close()
 	cancel()
 	wg.Wait()
 	fmt.Printf("Done!\n")
