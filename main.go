@@ -47,20 +47,18 @@ func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRem
 		}
 	}()
 	defer func() {
-		fmt.Printf("[%s] try to close disk\n", track.ID())
 		if err := writer.Close(); err != nil {
 			panic(err)
 		}
-		fmt.Printf("[%s] Start Done\n", track.ID())
+		fmt.Printf("[%s] Finished saving to disk\n", track.ID())
 		wg.Done()
-		fmt.Printf("[%s] Done\n", track.ID())
 	}()
 	wg.Add(1)
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[%s] stop saving to disk\n", track.ID())
+			fmt.Printf("[%s] Stop saving to disk\n", track.ID())
 			return
 		case r := <-channel:
 			if r.error != nil {
@@ -76,14 +74,11 @@ func saveToDisk(ctx context.Context, writer media.Writer, track *webrtc.TrackRem
 
 func saveOpusToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) {
 	codec := track.Codec()
-	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Printf("[%s] knwon codec %s: do not save (path not given)\n", track.ID(), mime)
 		readToDiscard(track)
 		return
 	}
 
-	fmt.Printf("[%s] known codec %s: save to '%s'\n", track.ID(), mime, path)
 	writer, err := oggwriter.New(path, codec.ClockRate, codec.Channels)
 	if err != nil {
 		panic(err)
@@ -92,15 +87,11 @@ func saveOpusToDisk(ctx context.Context, track *webrtc.TrackRemote, path string)
 }
 
 func saveVP8ToDisk(ctx context.Context, track *webrtc.TrackRemote, path string) {
-	codec := track.Codec()
-	mime := codec.MimeType
 	if len(path) == 0 {
-		fmt.Printf("[%s] known codec %s: do not save (path not given)\n", track.ID(), mime)
 		readToDiscard(track)
 		return
 	}
 
-	fmt.Printf("[%s] known codec %s: save to '%s'\n", track.ID(), mime, path)
 	writer, err := ivfwriter.New(path)
 	if err != nil {
 		panic(err)
@@ -131,10 +122,29 @@ var statsGetter stats.Getter
 
 var BENCH_COLUMN_NAMES = []string{"track", "last_received_dt", "packet_received", "packet_lost", "jitter", "nack_count"}
 
+var benchMutex sync.Mutex
+
+func writeBench(writer *csv.Writer, trackID string, inbound stats.InboundRTPStreamStats) {
+	benchMutex.Lock()
+	defer benchMutex.Unlock()
+
+	values := []string{
+		trackID,
+		inbound.LastPacketReceivedTimestamp.Format("2006-01-02T15:04:05.000000"),
+		strconv.FormatUint(inbound.PacketsReceived, 10),
+		strconv.FormatInt(inbound.PacketsLost, 10),
+		strconv.FormatFloat(inbound.Jitter, 'f', -1, 64),
+		strconv.FormatUint(uint64(inbound.NACKCount), 10),
+	}
+	writer.Write(values)
+}
+
 func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Writer, interval int) {
+	trackID := track.ID()
+
 	defer func() {
+		fmt.Printf("[%s] Finished writing bench\n", trackID)
 		wg.Done()
-		fmt.Printf("Bench Done\n");
 	}()
 	wg.Add(1)
 
@@ -142,25 +152,17 @@ func saveBench(ctx context.Context, track *webrtc.TrackRemote, writer *csv.Write
 	defer ticker.Stop()
 
 	count := 0
-	trackID := track.ID()
 	ssrc := uint32(track.SSRC())
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[%s] stop saving bench\n", trackID)
+			fmt.Printf("[%s] Stop saving bench\n", trackID)
 			return
 		case <-ticker.C:
 			stats := statsGetter.Get(ssrc)
 			inbound := stats.InboundRTPStreamStats
-			values := []string{
-				trackID,
-				inbound.LastPacketReceivedTimestamp.Format("2006-01-02T15:04:05.000000"),
-				strconv.FormatUint(inbound.PacketsReceived, 10),
-				strconv.FormatInt(inbound.PacketsLost, 10),
-				strconv.FormatFloat(inbound.Jitter, 'f', -1, 64),
-				strconv.FormatUint(uint64(inbound.NACKCount), 10),
-			}
-			writer.Write(values)
+
+			writeBench(writer, trackID, inbound)
 
 			count += 1
 			fmt.Printf("[%s] (%d / -) %v\n", trackID, count, inbound)
